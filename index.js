@@ -13,35 +13,45 @@ const fn = async () => {
     client2.connect(),
   ]);
 
-  const qs = new QueryStream('SELECT ogc_fid, height, st_asbinary(wkb_geometry) AS wkb_geometry FROM contour');
+  const qs = new QueryStream(`
+    SELECT
+      cont.id AS id,
+      cont.height AS height,
+      st_asbinary(cont.wkb_geometry) AS wkb_geometry
+    FROM cont LEFT JOIN cont_split ON cont_split.id = cont.id
+    WHERE cont_split.id IS NULL
+  `);
+
   const stream = client.query(qs);
 
   for await (const row of stream) {
-    num++;
     if (num % 1000 === 0) {
       console.log('ROW', num);
     }
+
+    num++;
+
     const gj = wkx.Geometry.parse(row.wkb_geometry).toGeoJSON();
     // console.log(gj);
     const len = gj.coordinates.length;
-    const n = Math.ceil(len / 1000);
+    const n = Math.ceil(len / 200);
     const size = len / n;
     let from = 0;
 
     for (let i = 0; i < n; i++) {
-      const rSize = Math.round(size);
-      const sliceCoords = gj.coordinates.slice(from, from + rSize);
+      const sliceCoords = gj.coordinates.slice(Math.round(from) - (from > 0 ? 1 : 0), Math.round(from + size));
       const sliceGeom = new wkx.LineString(sliceCoords.map(([x, y]) => (new wkx.Point(x, y)))).toWkb();
+
       await client2.query(
-        'INSERT INTO contour_split (cid, height, geom) VALUES ($1, $2, ST_GeomFromWKB($3, 900914))',
+        'INSERT INTO cont_split (id, height, wkb_geometry) VALUES ($1, $2, ST_GeomFromWKB($3, 900914))',
         [
-          row.ogc_fid,
+          row.id,
           row.height,
           sliceGeom,
         ],
       );
 
-      from += rSize - 1;
+      from += size;
     }
   }
 
