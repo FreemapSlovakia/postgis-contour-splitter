@@ -7,6 +7,9 @@ const client2 = new Client();
 
 let num = 0;
 
+const sourceTable = 'cont_dmr5';
+const destTable = 'cont_dmr5_split';
+
 const fn = async () => {
   await Promise.all([
     client.connect(),
@@ -15,11 +18,11 @@ const fn = async () => {
 
   const qs = new QueryStream(`
     SELECT
-      cont.id AS id,
-      cont.height AS height,
-      st_asbinary(cont.wkb_geometry) AS wkb_geometry
-    FROM cont LEFT JOIN cont_split ON cont_split.id = cont.id
-    WHERE cont_split.id IS NULL
+      ${sourceTable}.id AS id,
+      ${sourceTable}.height AS height,
+      st_asbinary(${sourceTable}.wkb_geometry) AS wkb_geometry
+    FROM ${sourceTable} LEFT JOIN ${destTable} ON ${destTable}.id = ${sourceTable}.id
+    WHERE ${destTable}.id IS NULL
   `);
 
   const stream = client.query(qs);
@@ -34,7 +37,7 @@ const fn = async () => {
     const gj = wkx.Geometry.parse(row.wkb_geometry).toGeoJSON();
     // console.log(gj);
     const len = gj.coordinates.length;
-    const n = Math.ceil(len / 200);
+    const n = Math.ceil(len / 1000);
     const size = len / n;
     let from = 0;
 
@@ -43,7 +46,7 @@ const fn = async () => {
       const sliceGeom = new wkx.LineString(sliceCoords.map(([x, y]) => (new wkx.Point(x, y)))).toWkb();
 
       await client2.query(
-        'INSERT INTO cont_split (id, height, wkb_geometry) VALUES ($1, $2, ST_GeomFromWKB($3, 900914))',
+        `INSERT INTO ${destTable} (id, height, wkb_geometry) VALUES ($1, $2, st_transform(ST_GeomFromWKB($3, 8353), 3857))`,
         [
           row.id,
           row.height,
