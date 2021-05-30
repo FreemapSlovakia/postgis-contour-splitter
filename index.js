@@ -7,8 +7,8 @@ const client2 = new Client();
 
 let num = 0;
 
-const sourceTable = 'cont_dmr5';
-const destTable = 'cont_dmr5_split';
+const sourceTable = 'cont_dmr';
+const destTable = 'cont_dmr_split';
 
 const fn = async () => {
   await Promise.all([
@@ -20,7 +20,7 @@ const fn = async () => {
     SELECT
       ${sourceTable}.id AS id,
       ${sourceTable}.height AS height,
-      st_asbinary(${sourceTable}.wkb_geometry) AS wkb_geometry
+      st_asbinary(st_simplify(${sourceTable}.wkb_geometry, 0.1, true)) AS wkb_geometry
     FROM ${sourceTable} LEFT JOIN ${destTable} ON ${destTable}.id = ${sourceTable}.id
     WHERE ${destTable}.id IS NULL
   `);
@@ -29,7 +29,13 @@ const fn = async () => {
 
   for await (const row of stream) {
     if (num % 1000 === 0) {
+      if (num > 0) {
+        await client2.query('COMMIT');
+      }
+
       console.log('ROW', num);
+
+      await client2.query('BEGIN');
     }
 
     num++;
@@ -46,7 +52,7 @@ const fn = async () => {
       const sliceGeom = new wkx.LineString(sliceCoords.map(([x, y]) => (new wkx.Point(x, y)))).toWkb();
 
       await client2.query(
-        `INSERT INTO ${destTable} (id, height, wkb_geometry) VALUES ($1, $2, st_transform(ST_GeomFromWKB($3, 8353), 3857))`,
+        `INSERT INTO ${destTable} (id, height, wkb_geometry) VALUES ($1, $2, ST_GeomFromWKB($3, 3857))`,
         [
           row.id,
           row.height,
@@ -57,6 +63,8 @@ const fn = async () => {
       from += size;
     }
   }
+
+  await client2.query('COMMIT');
 
   client.end();
   client2.end();
