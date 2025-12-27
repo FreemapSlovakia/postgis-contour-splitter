@@ -60,34 +60,44 @@ fn parse_gpkg_linestring(buffer: &[u8]) -> Result<LineString<f64>> {
     }
 }
 
-fn linestring_to_wkb(ls: &LineString<f64>) -> Result<Vec<u8>> {
-    Ok(Geometry::LineString(ls.clone())
+fn linestring_to_wkb(ls: LineString<f64>) -> Result<Vec<u8>> {
+    Ok(Geometry::LineString(ls)
         .to_ewkb(CoordDimensions::xy(), Some(3857))
         .map_err(|e| anyhow!("Failed to encode WKB: {e}"))?)
 }
 
-fn split_line(line: &LineString<f64>, max_coords: usize) -> Vec<LineString<f64>> {
-    if max_coords == 0 {
-        return vec![line.clone()];
+fn split_line(line: LineString<f64>, max_coords: usize) -> Vec<LineString<f64>> {
+    if max_coords < 2 {
+        return vec![line];
     }
 
     let coords: Vec<_> = line.coords().collect();
 
     if coords.len() <= max_coords {
-        return vec![line.clone()];
+        return vec![line];
     }
 
+    // Aim for near-equal parts with a single shared vertex between slices, without rounding drift.
     let parts = (coords.len() + max_coords - 1) / max_coords;
-    let size = (coords.len() as f64) / (parts as f64);
-    let mut from = 0f64;
+    let base = coords.len() / parts;
+    let extra = coords.len() % parts; // distribute remainders to the first slices
+
     let mut pieces = Vec::with_capacity(parts);
+    let mut cursor = 0usize;
 
-    for _ in 0..parts {
-        let start = (from.round() as isize - if from > 0.0 { 1 } else { 0 }).max(0) as usize;
+    let mut idx = 0usize;
+    while cursor < coords.len() {
+        let len_this = base + if idx < extra { 1 } else { 0 };
 
-        let end = ((from + size).round() as usize).min(coords.len());
+        let start_idx = if cursor > 0 {
+            cursor.saturating_sub(1)
+        } else {
+            0
+        };
 
-        let slice = coords[start..end]
+        let end_idx = (cursor + len_this).min(coords.len());
+
+        let slice = coords[start_idx..end_idx]
             .iter()
             .map(|c| Coord { x: c.x, y: c.y })
             .collect::<Vec<_>>();
@@ -96,15 +106,16 @@ fn split_line(line: &LineString<f64>, max_coords: usize) -> Vec<LineString<f64>>
             pieces.push(LineString::from(slice));
         }
 
-        from += size;
+        cursor = end_idx;
+        idx += 1;
     }
 
     pieces
 }
 
-fn simplify_line(line: &LineString<f64>, tolerance: f64, high_quality: bool) -> LineString<f64> {
+fn simplify_line(line: LineString<f64>, tolerance: f64, high_quality: bool) -> LineString<f64> {
     if tolerance <= 0.0 || line.0.len() < 3 {
-        return line.clone();
+        return line;
     }
 
     let simplified = if high_quality {
@@ -116,7 +127,7 @@ fn simplify_line(line: &LineString<f64>, tolerance: f64, high_quality: bool) -> 
     if simplified.0.len() >= 2 {
         simplified
     } else {
-        line.clone()
+        line
     }
 }
 
@@ -154,6 +165,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to query rows from {}", args.source_table))?;
 
     let mut processed = 0usize;
+
     let mut tx = pg_client.transaction()?;
 
     while let Some(row) = rows.next()? {
@@ -167,13 +179,13 @@ fn main() -> Result<()> {
             continue;
         }
 
-        let mut line = parse_gpkg_linestring(&geom)
+        let line = parse_gpkg_linestring(&geom)
             .with_context(|| format!("Failed to parse WKB for id {id}"))?;
 
-        line = simplify_line(&line, args.simplify_tolerance, args.simplify_high_quality);
+        let line = simplify_line(line, args.simplify_tolerance, args.simplify_high_quality);
 
-        for slice in split_line(&line, args.split_max_points) {
-            let wkb = linestring_to_wkb(&slice)?;
+        for slice in split_line(line, args.split_max_points) {
+            let wkb = linestring_to_wkb(slice)?;
 
             tx.execute(&insert_sql, &[&id, &height, &wkb])?;
         }
