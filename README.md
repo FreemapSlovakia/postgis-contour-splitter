@@ -1,8 +1,6 @@
 # Countour splitter
 
-Tool reads contours from a GeoPackage (`contours.gpkg`, table `contours_gedtm30` by default) and writes them to a PostGIS table (`cont_dmr_split` by default), evenly splitting lines so slices have at most 1000 coordinates. Optional simplification is available before splitting.
-
-To update source path/table or split limit please directly modify `index.js` or set env vars (`SOURCE_GPKG`, `SOURCE_TABLE`, `DEST_TABLE`, `SPLIT_MAX_POINTS`, `COMMIT_INTERVAL`, `SIMPLIFY_TOLERANCE`, `SIMPLIFY_HIGH_QUALITY`).
+Tool reads contours from a GeoPackage and writes them to a PostGIS table, evenly splitting lines so slices have at most 1000 (configurable) coordinates. Optional simplification is available before splitting. Source geometries are reprojected to EPSG:3857 in PostGIS with `ST_Transform` based on GeoPackage metadata.
 
 ## Rust version (faster, streaming)
 
@@ -14,17 +12,11 @@ cargo build --release
   --source-gpkg /path/to/contours.gpkg \
   --source-table contours_gedtm30 \
   --dest-table cont_dmr_split \
+  --source-epsg 25833 \
   --split-max-points 1000 \
   --simplify-tolerance 0 \
   --simplify-high-quality false \
   --commit-interval 1000
 ```
 
-Flags also read matching env vars (e.g. `SOURCE_GPKG`, `SOURCE_TABLE`, `DEST_TABLE`, `SPLIT_MAX_POINTS`, `SIMPLIFY_TOLERANCE`, `SIMPLIFY_HIGH_QUALITY`, `COMMIT_INTERVAL`, `DATABASE_URL` or `PG_CONNECTION_STRING`).
-
-## Usage
-
-```bash
-npm i
-node .
-```
+Flags also read matching env vars (e.g. `SOURCE_GPKG`, `SOURCE_TABLE`, `DEST_TABLE`, `SOURCE_EPSG`, `SPLIT_MAX_POINTS`, `SIMPLIFY_TOLERANCE`, `SIMPLIFY_HIGH_QUALITY`, `COMMIT_INTERVAL`, `DATABASE_URL` or `PG_CONNECTION_STRING`).

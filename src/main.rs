@@ -4,7 +4,7 @@ use geo::{Coord, Geometry, LineString, Simplify, SimplifyVw};
 use geozero::wkb::GpkgWkb;
 use geozero::{CoordDimensions, ToGeo, ToWkb};
 use postgres::{Client, NoTls};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::env;
 
 #[derive(Parser, Debug, Clone)]
@@ -15,16 +15,20 @@ use std::env;
 )]
 struct Args {
     /// Path to GeoPackage file
-    #[arg(long, env = "SOURCE_GPKG", default_value = "contours.gpkg")]
+    #[arg(long, env = "SOURCE_GPKG")]
     source_gpkg: String,
 
     /// Source table name in GeoPackage
-    #[arg(long, env = "SOURCE_TABLE", default_value = "contours_gedtm30")]
+    #[arg(long, env = "SOURCE_TABLE")]
     source_table: String,
 
     /// Destination Postgres table name
-    #[arg(long, env = "DEST_TABLE", default_value = "cont_dmr_split")]
+    #[arg(long, env = "DEST_TABLE")]
     dest_table: String,
+
+    /// Source EPSG (overrides GeoPackage metadata)
+    #[arg(long, env = "SOURCE_EPSG")]
+    source_epsg: Option<i32>,
 
     /// Postgres connection string (or use PG_CONNECTION_STRING)
     #[arg(long, env = "DATABASE_URL")]
@@ -47,6 +51,8 @@ struct Args {
     simplify_high_quality: bool,
 }
 
+const DEST_EPSG: i32 = 3857;
+
 fn parse_gpkg_linestring(buffer: &[u8]) -> Result<LineString<f64>> {
     let geom: Geometry<f64> = GpkgWkb(buffer)
         .to_geo()
@@ -62,8 +68,32 @@ fn parse_gpkg_linestring(buffer: &[u8]) -> Result<LineString<f64>> {
 
 fn linestring_to_wkb(ls: LineString<f64>) -> Result<Vec<u8>> {
     Ok(Geometry::LineString(ls)
-        .to_ewkb(CoordDimensions::xy(), Some(3857))
+        .to_ewkb(CoordDimensions::xy(), None)
         .map_err(|e| anyhow!("Failed to encode WKB: {e}"))?)
+}
+
+fn lookup_gpkg_srid(conn: &Connection, table: &str) -> Result<i32> {
+    let mut stmt = conn
+        .prepare("SELECT srs_id FROM gpkg_geometry_columns WHERE table_name = ?1 LIMIT 1")
+        .context("Failed to prepare GeoPackage SRID lookup")?;
+
+    let srs_id: Option<i32> = stmt
+        .query_row([table], |row| row.get(0))
+        .optional()
+        .context("Failed to query GeoPackage SRID")?;
+
+    let srs_id = srs_id.ok_or_else(|| {
+        anyhow!(
+            "Missing GeoPackage SRID metadata for table {} (gpkg_geometry_columns)",
+            table
+        )
+    })?;
+
+    if srs_id <= 0 {
+        return Err(anyhow!("Unsupported GeoPackage SRID {}", srs_id));
+    }
+
+    Ok(srs_id)
 }
 
 fn split_line(line: LineString<f64>, max_coords: usize) -> Vec<LineString<f64>> {
@@ -148,6 +178,11 @@ fn main() -> Result<()> {
     )
     .with_context(|| format!("Failed to open GeoPackage file {}", args.source_gpkg))?;
 
+    let source_epsg = match args.source_epsg {
+        Some(epsg) => epsg,
+        None => lookup_gpkg_srid(&gpkg, &args.source_table)?,
+    };
+
     let mut stmt = gpkg
         .prepare(&format!(
             "SELECT ID as id, height, geom FROM {}",
@@ -156,8 +191,13 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to prepare SELECT on {}", args.source_table))?;
 
     let insert_sql = format!(
-        "INSERT INTO {} (id, height, wkb_geometry) VALUES ($1, $2, ST_GeomFromWKB($3, 3857))",
-        args.dest_table
+        "INSERT INTO {} (id, height, wkb_geometry) VALUES ($1, $2, ST_Transform(ST_GeomFromWKB($3, $4), {}))",
+        args.dest_table, DEST_EPSG
+    );
+
+    println!(
+        "Reprojecting with PostGIS ST_Transform EPSG:{} -> EPSG:{}",
+        source_epsg, DEST_EPSG
     );
 
     let mut rows = stmt
@@ -187,7 +227,7 @@ fn main() -> Result<()> {
         for slice in split_line(line, args.split_max_points) {
             let wkb = linestring_to_wkb(slice)?;
 
-            tx.execute(&insert_sql, &[&id, &height, &wkb])?;
+            tx.execute(&insert_sql, &[&id, &height, &wkb, &source_epsg])?;
         }
 
         processed += 1;
