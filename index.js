@@ -7,8 +7,8 @@ const client2 = new Client();
 
 let num = 0;
 
-const sourceTable = 'cont_dmr';
-const destTable = 'cont_dmr_split';
+const sourceTable = 'cont_se_dmr';
+const destTable = 'contours_se';
 
 const fn = async () => {
   await Promise.all([
@@ -20,7 +20,7 @@ const fn = async () => {
     SELECT
       ${sourceTable}.id AS id,
       ${sourceTable}.height AS height,
-      st_asbinary(st_simplify(${sourceTable}.wkb_geometry, 0.1, true)) AS wkb_geometry
+      st_asbinary(st_simplify(${sourceTable}.wkb_geometry, 1, true)) AS wkb_geometry
     FROM ${sourceTable} LEFT JOIN ${destTable} ON ${destTable}.id = ${sourceTable}.id
     WHERE ${destTable}.id IS NULL
   `);
