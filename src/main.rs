@@ -43,12 +43,16 @@ struct Args {
     commit_interval: usize,
 
     /// Simplification tolerance (0 disables)
-    #[arg(long, env = "SIMPLIFY_TOLERANCE", default_value_t = 0.0)]
+    #[arg(long, env = "SIMPLIFY_TOLERANCE", default_value_t = 1.0)]
     simplify_tolerance: f64,
 
     /// Use high-quality (Visvalingam) simplification
     #[arg(long, env = "SIMPLIFY_HIGH_QUALITY", default_value_t = false)]
     simplify_high_quality: bool,
+
+    /// Drop the destination table first, if it exists
+    #[arg(long, env = "DROP_EXISTING", default_value_t = false)]
+    drop_existing: bool,
 }
 
 const DEST_EPSG: i32 = 3857;
@@ -190,8 +194,32 @@ fn main() -> Result<()> {
         ))
         .with_context(|| format!("Failed to prepare SELECT on {}", args.source_table))?;
 
+    // Create the destination table in its final serving shape: two columns, no
+    // primary key, no surrogate id. Previously the table had to be created by
+    // hand and then ALTERed afterwards (drop ogc_fid, drop id, cast height to
+    // smallint, rename to height_m) — which was easy to forget and easy to get
+    // subtly wrong between countries.
+    //
+    // height_m is smallint deliberately: every serving table already uses it,
+    // and it comfortably holds the range (Zugspitze 2962 m, Tournai quarries
+    // -130 m) against smallint's -32768..32767.
+    if args.drop_existing {
+        println!("Dropping {} if it exists", args.dest_table);
+        pg_client.batch_execute(&format!("DROP TABLE IF EXISTS {}", args.dest_table))?;
+    }
+
+    pg_client
+        .batch_execute(&format!(
+            "CREATE TABLE IF NOT EXISTS {} (
+                 height_m      smallint,
+                 wkb_geometry  geometry(LineString, {})
+             )",
+            args.dest_table, DEST_EPSG
+        ))
+        .with_context(|| format!("Failed to create destination table {}", args.dest_table))?;
+
     let insert_sql = format!(
-        "INSERT INTO {} (id, height, wkb_geometry) VALUES ($1, $2, ST_Transform(ST_GeomFromWKB($3, $4), {}))",
+        "INSERT INTO {} (height_m, wkb_geometry) VALUES ($1, ST_Transform(ST_GeomFromWKB($2, $3), {}))",
         args.dest_table, DEST_EPSG
     );
 
@@ -213,6 +241,10 @@ fn main() -> Result<()> {
 
         let height: Option<f64> = row.get("height")?;
 
+        // Contour intervals are whole metres; round rather than truncate so a
+        // stored -129.9999 does not become -129.
+        let height_m: Option<i16> = height.map(|h| h.round() as i16);
+
         let geom: Vec<u8> = row.get("geom")?;
 
         if geom.is_empty() {
@@ -227,7 +259,7 @@ fn main() -> Result<()> {
         for slice in split_line(line, args.split_max_points) {
             let wkb = linestring_to_wkb(slice)?;
 
-            tx.execute(&insert_sql, &[&id, &height, &wkb, &source_epsg])?;
+            tx.execute(&insert_sql, &[&height_m, &wkb, &source_epsg])?;
         }
 
         processed += 1;
@@ -241,5 +273,22 @@ fn main() -> Result<()> {
 
     tx.commit()?;
     println!("Finished. Total processed: {}", processed);
+
+    // Build the GiST index last — far cheaper than maintaining it row by row
+    // during the load. Named <table>_wkb_geometry_geom_idx, matching every
+    // serving table (contours_en, contours_hr, contours_lu, ...).
+    let index_name = format!("{}_wkb_geometry_geom_idx", args.dest_table.replace('.', "_"));
+    println!("Creating index {}", index_name);
+    pg_client
+        .batch_execute(&format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} USING gist (wkb_geometry)",
+            index_name, args.dest_table
+        ))
+        .with_context(|| format!("Failed to create index {}", index_name))?;
+
+    println!("Analyzing {}", args.dest_table);
+    pg_client.batch_execute(&format!("ANALYZE {}", args.dest_table))?;
+
+    println!("Done.");
     Ok(())
 }
